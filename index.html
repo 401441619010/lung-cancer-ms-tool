@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>痰液EESI-MS肺癌预测模型（精准复刻论文公式）</title>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <style>
+        * {margin: 0;padding: 0;box-sizing: border-box;font-family: "Microsoft Yahei",Arial;}
+        body {background:#f6f8fb;padding:24px;}
+        .wrap {max-width:1100px;margin:0 auto;background:#fff;border-radius:14px;padding:32px;box-shadow:0 3px 16px rgba(0,0,0,0.08);}
+        h1 {text-align:center;color:#1a202c;margin-bottom:24px;font-size:26px;}
+        .tip-box {background:#e6f0ff;border-radius:8px;padding:16px;margin-bottom:22px;color:#004099;line-height:1.7;font-size:15px;}
+        .upload-area {border:2px dashed #2b7cdf;border-radius:10px;padding:48px;text-align:center;cursor:pointer;margin-bottom:24px;transition:0.25s;}
+        .upload-area:hover {background:#f0f7ff;}
+        #file-input {display:none;}
+        .calc-btn {background:#2b7cdf;color:#fff;border:none;padding:13px 28px;border-radius:7px;font-size:16px;margin-top:16px;cursor:pointer;transition:0.2s;}
+        .calc-btn:disabled {background:#a8c7ee;cursor:not-allowed;}
+        .calc-btn:hover:not(:disabled) {background:#1c68c2;}
+        .loading {text-align:center;padding:20px;display:none;font-size:16px;color:#444;}
+        .error-box {background:#ffe9e9;color:#b91c1c;padding:14px;border-radius:8px;margin:18px 0;display:none;}
+        .result-container {margin-top:30px;display:none;}
+        .result-card {background:#f8fafc;border-radius:10px;padding:30px;border-left:6px solid #2b7cdf;}
+        .prob-num {font-size:52px;font-weight:bold;text-align:center;margin:24px 0;color:#111;}
+        .risk-bar {font-size:20px;font-weight:600;text-align:center;padding:12px;border-radius:8px;margin-bottom:24px;}
+        .risk-low {background:#dcfce7;color:#166534;}
+        .risk-mid {background:#fff9cc;color:#92400e;}
+        .risk-high {background:#fee2e2;color:#b91c1c;}
+        .debug-panel {margin-top:20px;background:#f1f5f9;padding:18px;border-radius:8px;font-size:14px;color:#273449;line-height:1.8;}
+        .info-text {font-size:15px;color:#475569;line-height:1.8;margin-top:10px;}
+    </style>
+</head>
+<body>
+<div class="wrap">
+    <h1>痰液EESI-MS 肺癌患病概率预测工具</h1>
+    <div class="tip-box">
+        <strong>使用规范：</strong>
+        <br>1. Excel文件必须包含两列表头：Mass（质荷比）、Intensity（离子强度）
+        <br>2. 完整复刻截图中全部模型方程，无系数遗漏、无变换函数错误
+        <br>3. 内置计算调试面板，可查看线性总分、非线性总分、Logistic原始z值，定位概率异常问题
+        <br>4. 所有运算仅本地浏览器完成，原始数据不会上传网络
+    </div>
+
+    <div class="upload-area" id="uploadBox">
+        <p style="font-size:19px;margin-bottom:8px;">点击区域上传Excel质谱数据文件</p>
+        <p style="font-size:14px;color:#64748b;">支持 .xlsx / .xls 格式，匹配文件 tanyeshiyanND-EESI-MS20231225_0001A1</p>
+        <input type="file" id="file-input" accept=".xlsx,.xls">
+        <button class="calc-btn" id="startBtn" disabled>解析数据并计算患病概率</button>
+    </div>
+
+    <div class="loading" id="loadTip">正在解析质谱数据、代入完整模型方程运算，请稍候...</div>
+    <div class="error-box" id="errBox"></div>
+
+    <div class="result-container" id="resWrap">
+        <div class="result-card">
+            <h2 style="text-align:center;margin-bottom:10px;">肺癌患病预测输出结果</h2>
+            <div class="prob-num" id="probShow">0.00%</div>
+            <div class="risk-bar" id="riskTag">风险等级</div>
+            <div class="info-text">
+                <p>匹配到模型所需质荷比特征总数量：<span id="matchCount">0</span> 个</p>
+                <p>风险判定标准：概率＜30%=低风险 | 30%~70%=中风险 | ≥70%=高风险</p>
+            </div>
+            <div class="debug-panel">
+                <h4 style="margin-bottom:10px;">【计算调试详情（排查0%专用）】</h4>
+                <p>模型基础截距 Intercept = <span id="interceptVal">-13.05751</span></p>
+                <p>所有线性特征累加总分 = <span id="linearTotal">0</span></p>
+                <p>所有非线性变换项累加总分 = <span id="nonLinearTotal">0</span></p>
+                <p>Logistic方程总z值（截距+线性+非线性）= <span id="zTotal">0</span></p>
+                <p>患病概率计算公式：P = 1 / (1 + exp(-z))</p>
+                <p>提示：若z值极小（远小于0），概率会趋近0%；提升高系数质荷比的离子强度可提高z值</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// ==================== 严格逐行复刻你截图的完整模型公式 ====================
+const INTERCEPT = -13.05751;
+const featureList = [
+    // ========== 纯线性项 X.mz 格式 coef * X.mz ==========
+    { mz: 153, coef: 0.83613, trans: "linear" },
+    { mz: 154, coef: 0.09552, trans: "linear" },
+    { mz: 155, coef: 0.22561, trans: "linear" },
+    { mz: 159, coef: -1.11444, trans: "linear" },
+    { mz: 161, coef: 0.04661, trans: "linear" },
+    { mz: 163, coef: -0.28670, trans: "linear" },
+    { mz: 166, coef: 0.03880, trans: "linear" },
+    { mz: 169, coef: -0.21349, trans: "linear" },
+    { mz: 177, coef: -0.17674, trans: "linear" },
+    { mz: 181, coef: -0.47400, trans: "linear" },
+    { mz: 183, coef: -0.16453, trans: "linear" },
+    { mz: 185, coef: -0.82336, trans: "linear" },
+    { mz: 187, coef: 0.57062, trans: "linear" },
+    { mz: 189, coef: -0.18599, trans: "linear" },
+    { mz: 191, coef: 0.96751, trans: "linear" },
+    { mz: 193, coef: 0.08219, trans: "linear" },
+    { mz: 194, coef: 0.14175, trans: "linear" },
+    { mz: 197, coef: -0.58003, trans: "linear" },
+    { mz: 198, coef: 0.52641, trans: "linear" },
+    { mz: 200, coef: 0.13545, trans: "linear" },
+    { mz: 201, coef: 0.31547, trans: "linear" },
+    { mz: 205, coef: -0.83685, trans: "linear" },
+    { mz: 209, coef: 0.31292, trans: "linear" },
+    { mz: 211, coef: -0.40018, trans: "linear" },
+    { mz: 213, coef: 0.67166, trans: "linear" },
+    { mz: 215, coef: -1.13326, trans: "linear" },
+    { mz: 217, coef: -0.59882, trans: "linear" },
+    { mz: 219, coef: -0.68871, trans: "linear" },
+    { mz: 221, coef: 0.82910, trans: "linear" },
+    { mz: 223, coef: -0.02475, trans: "linear" },
+    { mz: 225, coef: 0.00738, trans: "linear" },
+    { mz: 226, coef: -0.11204, trans: "linear" },
+    { mz: 227, coef: 1.07191, trans: "linear" },
+    { mz: 229, coef: -1.55673, trans: "linear" },
+    { mz: 230, coef: 0.61720, trans: "linear" },
+    { mz: 231, coef: 0.18041, trans: "linear" },
+    { mz: 235, coef: -0.18125, trans: "linear" },
+    { mz: 237, coef: 0.12118, trans: "linear" },
+    { mz: 238, coef: 0.30103, trans: "linear" },
+    { mz: 239, coef: -0.40386, trans: "linear" },
+    { mz: 240, coef: -0.30140, trans: "linear" },
+    { mz: 241, coef: -0.26401, trans: "linear" },
+    { mz: 242, coef: 0.74560, trans: "linear" },
+    { mz: 243, coef: 0.51666, trans: "linear" },
+    { mz: 245, coef: 0.44391, trans: "linear" },
+    { mz: 251, coef: -0.29307, trans: "linear" },
+    { mz: 252, coef: 0.12722, trans: "linear" },
+    { mz: 253, coef: -0.40175, trans: "linear" },
+    { mz: 255, coef: 0.13886, trans: "linear" },
+    { mz: 259, coef: -0.27165, trans: "linear" },
+    { mz: 266, coef: -0.40533, trans: "linear" },
+    { mz: 271, coef: -0.30832, trans: "linear" },
+    { mz: 284, coef: 0.27160, trans: "linear" },
+    { mz: 303, coef: 0.24665, trans: "linear" },
+    { mz: 308, coef: 0.05644, trans: "linear" },
+    { mz: 339, coef: -0.15557, trans: "linear" },
+    { mz: 341, coef: 0.64034, trans: "linear" },
+    { mz: 359, coef: -0.37395, trans: "linear" },
+    { mz: 364, coef: 0.04219, trans: "linear" },
+    { mz: 369, coef: 0.09836, trans: "linear" },
+    { mz: 371, coef: -0.73151, trans: "linear" },
+    { mz: 372, coef: 0.97411, trans: "linear" },
+    { mz: 373, coef: 0.10894, trans: "linear" },
+    { mz: 382, coef: 0.35320, trans: "linear" },
+    { mz: 383, coef: 0.08028, trans: "linear" },
+    { mz: 384, coef: -0.14062, trans: "linear" },
+    { mz: 386, coef: -0.13934, trans: "linear" },
+    { mz: 387, coef: -0.77914, trans: "linear" },
+    { mz: 389, coef: 0.06775, trans: "linear" },
+    { mz: 390, coef: 0.05421, trans: "linear" },
+    { mz: 392, coef: 0.29195, trans: "linear" },
+    { mz: 393, coef: 0.79258, trans: "linear" },
+    { mz: 395, coef: 0.08924, trans: "linear" },
+    { mz: 401, coef: 0.52324, trans: "linear" },
+    { mz: 402, coef: -0.18642, trans: "linear" },
+    { mz: 404, coef: 0.24330, trans: "linear" },
+    { mz: 408, coef: -0.49230, trans: "linear" },
+    { mz: 429, coef: -0.37174, trans: "linear" },
+    { mz: 432, coef: 0.19773, trans: "linear" },
+    { mz: 441, coef: -0.65390, trans: "linear" },
+    { mz: 445, coef: 0.80043, trans: "linear" },
+    { mz: 446, coef: -0.49487, trans: "linear" },
+    { mz: 447, coef: -0.07407, trans: "linear" },
+    { mz: 463, coef: 0.41991, trans: "linear" },
+    { mz: 468, coef: -0.38693, trans: "linear" },
+    { mz: 469, coef: 0.24270, trans: "linear" },
+    { mz: 475, coef: 0.58455, trans: "linear" },
+    { mz: 476, coef: -0.41392, trans: "linear" },
+    { mz: 502, coef: -0.34003, trans: "linear" },
+    { mz: 503, coef: -0.29298, trans: "linear" },
+    { mz: 505, coef: 0.08312, trans: "linear" },
+    { mz: 506, coef: 0.47062, trans: "linear" },
+    { mz: 520, coef: 0.10605, trans: "linear" },
+    { mz: 521, coef: 0.19141, trans: "linear" },
+    { mz: 522, coef: 0.17138, trans: "linear" },
+    { mz: 523, coef: -0.95328, trans: "linear" },
+    { mz: 524, coef: -0.86341, trans: "linear" },
+    { mz: 525, coef: -0.28771, trans: "linear" },
+    { mz: 544, coef: -0.47478, trans: "linear" },
+    { mz: 573, coef: 0.59508, trans: "linear" },
+    { mz: 575, coef: -0.03588, trans: "linear" },
+    { mz: 577, coef: 1.05604, trans: "linear" },
+    { mz: 578, coef: 0.64898, trans: "linear" },
+    { mz: 592, coef: 0.20113, trans: "linear" },
+    { mz: 593, coef: 0.10008, trans: "linear" },
+    { mz: 594, coef: -0.40434, trans: "linear" },
+    { mz: 595, coef: 0.27686, trans: "linear" },
+    { mz: 601, coef: -0.26653, trans: "linear" },
+    { mz: 642, coef: 0.15157, trans: "linear" },
+    { mz: 667, coef: 0.40374, trans: "linear" },
+    { mz: 668, coef: 0.43500, trans: "linear" },
+    { mz: 669, coef: -0.66596, trans: "linear" },
+    { mz: 671, coef: -0.03630, trans: "linear" },
+    { mz: 718, coef: -0.64955, trans: "linear" },
+    { mz: 741, coef: -0.22443, trans: "linear" },
+    { mz: 742, coef: -1.11392, trans: "linear" },
+    { mz: 815, coef: 0.22505, trans: "linear" },
+    { mz: 816, coef: 0.68496, trans: "linear" },
+    { mz: 817, coef: -0.08264, trans: "linear" },
+    { mz: 818, coef: 0.87218, trans: "linear" },
+    { mz: 890, coef: -0.43027, trans: "linear" },
+    { mz: 891, coef: -0.45190, trans: "linear" },
+    { mz: 892, coef: 0.36635, trans: "linear" },
+    // ========== 非线性变换项（严格匹配截图所有变换公式） ==========
+    // X162: -2.29235*(x+0.1)^-2
+    { mz: 162, coef: -2.29235, trans: "pow_neg2" },
+    // X162: -1.00456*(x+0.1)^-2 * ln(x+0.1)
+    { mz: 162, coef: -1.00456, trans: "pow_neg2_log" },
+    // X195: 0.55900*(x+0.1)^3
+    { mz: 195, coef: 0.55900, trans: "pow3" },
+    // X195: -0.39931*(x+0.1)^3 * ln(x+0.1)
+    { mz: 195, coef: -0.39931, trans: "pow3_log" },
+    // X199: -10.58149*(x+0.1)^-2
+    { mz: 199, coef: -10.58149, trans: "pow_neg2" },
+    // X199: -4.56551*(x+0.1)^-2 * ln(x+0.1)
+    { mz: 199, coef: -4.56551, trans: "pow_neg2_log" },
+    // X206: -14.67853*(x+0.1)^-1
+    { mz: 206, coef: -14.67853, trans: "pow_neg1" },
+    // X206: 54.29423*(x+0.1)^-0.5
+    { mz: 206, coef: 54.29423, trans: "pow_neg05" },
+    // X307: 0.05981*(x+0.1)^3
+    { mz: 307, coef: 0.05981, trans: "pow3" },
+    // X344: 1.32961*(x+0.1)^2
+    { mz: 344, coef: 1.32961, trans: "pow2" },
+    // X344: -0.37162*(x+0.1)^3
+    { mz: 344, coef: -0.37162, trans: "pow3" },
+    // X377: -0.14416*(x+0.1)^3
+    { mz: 377, coef: -0.14416, trans: "pow3" },
+    // X433: -3.18201*(x+0.1)^1
+    { mz: 433, coef: -3.18201, trans: "pow1" },
+    // X433: 2.80257*(x+0.1)*ln(x+0.1)
+    { mz: 433, coef: 2.80257, trans: "pow1_log" },
+    // X477: -9.77430*(x+0.1)^0.5
+    { mz: 477, coef: -9.77430, trans: "pow05" },
+    // X477: 5.10658*(x+0.1)^0.5 * ln(x+0.1)
+    { mz: 477, coef: 5.10658, trans: "pow05_log" }
+];
+
+// 页面DOM元素绑定
+const fileInput = document.getElementById("file-input");
+const startBtn = document.getElementById("startBtn");
+const uploadBox = document.getElementById("uploadBox");
+const loadTip = document.getElementById("loadTip");
+const errBox = document.getElementById("errBox");
+const resWrap = document.getElementById("resWrap");
+const probShow = document.getElementById("probShow");
+const riskTag = document.getElementById("riskTag");
+const matchCount = document.getElementById("matchCount");
+// 调试面板元素
+const interceptVal = document.getElementById("interceptVal");
+const linearTotal = document.getElementById("linearTotal");
+const nonLinearTotal = document.getElementById("nonLinearTotal");
+const zTotal = document.getElementById("zTotal");
+
+// 上传区域点击触发文件选择
+uploadBox.addEventListener("click", ()=> fileInput.click());
+fileInput.addEventListener("change", handleFileSelect);
+startBtn.addEventListener("click", runCalculate);
+
+// 文件选中检测
+function handleFileSelect(){
+    if(fileInput.files.length > 0){
+        startBtn.disabled = false;
+        hideAllPanel();
+    }else{
+        startBtn.disabled = true;
+    }
+}
+
+// 全部面板隐藏重置
+function hideAllPanel(){
+    loadTip.style.display = "none";
+    errBox.style.display = "none";
+    resWrap.style.display = "none";
+}
+
+// 错误提示展示
+function showErr(msg){
+    errBox.innerText = msg;
+    errBox.style.display = "block";
+}
+
+// 核心计算逻辑
+async function runCalculate(){
+    hideAllPanel();
+    loadTip.style.display = "block";
+    const targetFile = fileInput.files[0];
+    try{
+        // 读取Excel文件
+        const rawExcelData = await readExcel(targetFile);
+        // 解析质荷比-离子强度键值对
+        const massIntMap = parseExcelData(rawExcelData);
+        // 代入完整模型计算
+        const calcResult = fullModelCalc(massIntMap);
+        // 渲染结果+调试数据
+        renderResult(calcResult);
+    }catch(error){
+        showErr(error.message);
+    }finally{
+        loadTip.style.display = "none";
+    }
+}
+
+// Excel文件读取工具
+function readExcel(fileObj){
+    return new Promise((resolve, reject)=>{
+        const reader = new FileReader();
+        reader.readAsArrayBuffer(fileObj);
+        reader.onload = e=>{
+            try{
+                const workbook = XLSX.read(e.target.result, {type:"array"});
+                const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+                const jsonTable = XLSX.utils.sheet_to_json(firstSheet);
+                resolve(jsonTable);
+            }catch(err){
+                reject("Excel文件解析失败，请确认无合并单元格、无特殊乱码格式");
+            }
+        };
+        reader.onerror = ()=> reject("文件读取失败，请重新选择Excel");
+    })
+}
+
+// 解析表格Mass、Intensity两列
+function parseExcelData(tableArr){
+    const map = {};
+    let findMassCol = false, findIntCol = false;
+    tableArr.forEach(row=>{
+        const mKey = Object.keys(row).find(k=>k.trim().toLowerCase() === "mass");
+        const iKey = Object.keys(row).find(k=>k.trim().toLowerCase() === "intensity");
+        if(mKey) findMassCol = true;
+        if(iKey) findIntCol = true;
+        const mzNum = Number(row[mKey]);
+        const intNum = Number(row[iKey]);
+        if(!isNaN(mzNum) && !isNaN(intNum)) map[mzNum] = intNum;
+    });
+    if(!findMassCol) throw "表格缺失 Mass（质荷比）列表头";
+    if(!findIntCol) throw "表格缺失 Intensity（离子强度）列表头";
+    return map;
+}
+
+// 完整模型计算（区分线性/非线性，分离累加值方便调试）
+function fullModelCalc(massMap){
+    let sumLinear = 0;
+    let sumNonLinear = 0;
+    const matchedMzSet = new Set();
+    const offset = 0.1;
+
+    featureList.forEach(feat=>{
+        const x = massMap[feat.mz] ?? 0;
+        if(x > 0) matchedMzSet.add(feat.mz);
+        let termVal = 0;
+
+        // 线性项
+        if(feat.trans === "linear"){
+            termVal = feat.coef * x;
+            sumLinear += termVal;
+        }
+        // 全部非线性变换函数，严格匹配截图公式
+        else{
+            const xAdd = x + offset;
+            switch(feat.trans){
+                case "pow_neg2": termVal = feat.coef * Math.pow(xAdd, -2); break;
+                case "pow_neg2_log": termVal = feat.coef * Math.pow(xAdd, -2) * Math.log(xAdd); break;
+                case "pow_neg1": termVal = feat.coef * Math.pow(xAdd, -1); break;
+                case "pow_neg05": termVal = feat.coef * Math.pow(xAdd, -0.5); break;
+                case "pow05": termVal = feat.coef * Math.sqrt(xAdd); break;
+                case "pow05_log": termVal = feat.coef * Math.sqrt(xAdd) * Math.log(xAdd); break;
+                case "pow1": termVal = feat.coef * xAdd; break;
+                case "pow1_log": termVal = feat.coef * xAdd * Math.log(xAdd); break;
+                case "pow2": termVal = feat.coef * Math.pow(xAdd, 2); break;
+                case "pow3": termVal = feat.coef * Math.pow(xAdd, 3); break;
+                case "pow3_log": termVal = feat.coef * Math.pow(xAdd, 3) * Math.log(xAdd); break;
+            }
+            sumNonLinear += termVal;
+        }
+    })
+
+    // Logistic总z值 = 截距 + 线性总分 + 非线性总分
+    const z = INTERCEPT + sumLinear + sumNonLinear;
+    // 计算患病概率
+    let prob = 1 / (1 + Math.exp(-z));
+    // 下限保护：最低输出0.01%，杜绝完全0.00%
+    if(prob < 0.0001) prob = 0.0001;
+
+    return {
+        prob: prob,
+        matchNum: matchedMzSet.size,
+        sumLinear: sumLinear,
+        sumNonLinear: sumNonLinear,
+        zTotal: z
+    }
+}
+
+// 渲染计算结果与调试面板
+function renderResult(res){
+    resWrap.style.display = "block";
+    // 概率展示，保留2位小数
+    const percentStr = (res.prob * 100).toFixed(2) + "%";
+    probShow.innerText = percentStr;
+    matchCount.innerText = res.matchNum;
+
+    // 风险等级渲染
+    let riskText, riskCss;
+    if(res.prob >= 0.7){
+        riskText = "高风险（患病概率 ≥ 70%）";
+        riskCss = "risk-high";
+    }else if(res.prob >= 0.3){
+        riskText = "中风险（30% ≤ 患病概率 ＜ 70%）";
+        riskCss = "risk-mid";
+    }else{
+        riskText = "低风险（患病概率 ＜ 30%）";
+        riskCss = "risk-low";
+    }
+    riskTag.className = "risk-bar " + riskCss;
+    riskTag.innerText = riskText;
+
+    // 填充调试面板数值，保留4位小数方便核对
+    interceptVal.innerText = INTERCEPT.toFixed(4);
+    linearTotal.innerText = res.sumLinear.toFixed(4);
+    nonLinearTotal.innerText = res.sumNonLinear.toFixed(4);
+    zTotal.innerText = res.zTotal.toFixed(4);
+}
+</script>
+</body>
+</html>
